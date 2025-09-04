@@ -44,7 +44,10 @@ async def relay_message(message: types.Message):
                 pass
 
 async def main():
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"❌ Помилка: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
