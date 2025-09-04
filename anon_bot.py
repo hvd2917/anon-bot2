@@ -3,7 +3,7 @@ import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-API_TOKEN = "AAH7uSorS3rHUaVsdY4l7hEoIhhgLZ7llZ0"
+API_TOKEN = "7855790242:AAH1FQMfkZSWm0l76AxALqfeiGcALgqdP-0"
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
