@@ -21,7 +21,10 @@ chat_members = set()     # users who have set a nick
 waiting_for_nick = set() # users currently entering a nick
 
 # ==== DB setup ====
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+dir_path = os.path.dirname(DB_PATH)
+if dir_path:
+    os.makedirs(dir_path, exist_ok=True)
+
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
@@ -55,7 +58,7 @@ def get_nick(user_id: int):
     conn.close()
     return row[0] if row else None
 
-def add_message(user_id: int, nick: str, content_type: str, text: str = None):
+def add_message(user_id: int, content_type: str, text: str = None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -142,7 +145,7 @@ async def handle_message(message: types.Message):
     # Relay messages to all others
     if user_id in chat_members:
         nick = user_nicks[user_id]
-        msg_id = add_message(user_id, nick, message.content_type, text or message.caption)
+        msg_id = add_message(user_id, message.content_type, text or message.caption)
         reply_text = ""
         if message.reply_to_message:
             reply_text = f"(Reply to: {get_message_preview(msg_id-1)})\n"
