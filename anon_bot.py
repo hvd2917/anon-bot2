@@ -1,23 +1,20 @@
-import asyncio
 import os
 import sqlite3
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiohttp import web
+import asyncio
 
 # ==== Settings ====
 API_TOKEN = os.getenv("API_TOKEN")
-if not API_TOKEN:
-    raise ValueError("Set API_TOKEN in Environment Variables")
-
-admin_env = os.getenv("ADMIN_ID")
-if not admin_env:
-    raise ValueError("Set ADMIN_ID in Environment Variables")
-ADMIN_ID = int(admin_env)
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") + WEBHOOK_PATH  # https://your-app.onrender.com
 
 DB_PATH = os.getenv("DB_PATH", "chat.db")
 
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot=bot)
+dp = Dispatcher(bot)
 
 # ==== User data ====
 user_nicks = {}          # user_id -> nick
@@ -155,17 +152,14 @@ async def pinned_cmd(message: types.Message):
 
 @dp.message(Command("pin"))
 async def pin_cmd(message: types.Message):
-    # admin only
     if message.from_user.id != ADMIN_ID:
         await message.answer("Only admin can pin messages")
         return
 
-    # reply required
     if not message.reply_to_message:
         await message.answer("Reply to the message you want to pin with /pin")
         return
 
-    # save pinned
     content_type = message.reply_to_message.content_type
     text = message.reply_to_message.text or message.reply_to_message.caption or ""
     telegram_msg_id = message.reply_to_message.message_id
@@ -186,7 +180,6 @@ async def handle_message(message: types.Message):
         waiting_for_nick.remove(user_id)
         await message.answer(f"✅ Your name is set: {nick}\nYou can now chat!")
 
-        # send pinned messages
         pinned = get_pinned_messages()
         for uid, content_type, txt in pinned:
             sender_nick = get_nick(uid) or "Anonymous"
@@ -200,19 +193,15 @@ async def handle_message(message: types.Message):
     if user_id in chat_members:
         nick = user_nicks[user_id]
         to_remove = set()
-        reply_to_id = None
-        if message.reply_to_message:
-            reply_to_id = message.reply_to_message.message_id
+        reply_to_id = message.reply_to_message.message_id if message.reply_to_message else None
 
         for uid in chat_members:
             if uid == user_id:
                 continue
             try:
-                # Text
                 if message.text:
                     sent = await bot.send_message(uid, f"**{nick}:** {text}", parse_mode="Markdown", reply_to_message_id=reply_to_id)
                     add_message(user_id, "text", text, sent.message_id)
-                # Media (photo/video/audio/document/voice)
                 elif message.photo:
                     sent = await bot.send_photo(uid, message.photo[-1].file_id, caption=f"**{nick}:** {message.caption or ''}", parse_mode="Markdown", reply_to_message_id=reply_to_id)
                     add_message(user_id, "photo", message.caption or "", sent.message_id)
@@ -228,7 +217,6 @@ async def handle_message(message: types.Message):
                 elif message.document:
                     sent = await bot.send_document(uid, document=message.document.file_id, caption=f"**{nick}:**", reply_to_message_id=reply_to_id)
                     add_message(user_id, "document", message.document.file_name or "", sent.message_id)
-
             except Exception as e:
                 to_remove.add(uid)
                 try:
@@ -239,7 +227,16 @@ async def handle_message(message: types.Message):
             chat_members.discard(uid)
             user_nicks.pop(uid, None)
 
-# ==== HeartBeat ====
+# ==== Webhook handler ====
+async def handle_webhook(request):
+    update = types.Update(**await request.json())
+    await dp.process_update(update)
+    return web.Response()
+
+app = web.Application()
+app.router.add_post(WEBHOOK_PATH, handle_webhook)
+
+# ==== Heartbeat ====
 async def heartbeat():
     while True:
         try:
@@ -248,16 +245,15 @@ async def heartbeat():
             pass
         await asyncio.sleep(3600)
 
-# ==== Main ====
-async def main():
+# ==== Startup ====
+async def on_startup():
+    await bot.delete_webhook()
+    await bot.set_webhook(WEBHOOK_URL)
     asyncio.create_task(heartbeat())
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        try:
-            await bot.send_message(ADMIN_ID, f"❌ Bot crashed: {e}")
-        except:
-            print(f"Failed to notify admin: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import ssl
+    port = int(os.getenv("PORT", 8443))
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(on_startup())
+    web.run_app(app, port=port)
