@@ -5,12 +5,16 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
 # ==== Settings ====
-API_TOKEN = os.getenv("API_TOKEN")  # Telegram bot token
-ADMIN_ID = int(os.getenv("ADMIN_ID"))  # Your Telegram ID for notifications
-DB_PATH = os.getenv("DB_PATH", "chat.db")  # SQLite path; use /data/chat.db on Render Paid
+API_TOKEN = os.getenv("API_TOKEN")
+if not API_TOKEN:
+    raise ValueError("Set API_TOKEN in Environment Variables")
 
-if not API_TOKEN or not ADMIN_ID:
-    raise ValueError("Set API_TOKEN and ADMIN_ID in Environment Variables")
+admin_env = os.getenv("ADMIN_ID")
+if not admin_env:
+    raise ValueError("Set ADMIN_ID in Environment Variables")
+ADMIN_ID = int(admin_env)
+
+DB_PATH = os.getenv("DB_PATH", "chat.db")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot=bot)
@@ -18,7 +22,7 @@ dp = Dispatcher(bot=bot)
 # ==== User data ====
 user_nicks = {}          # user_id -> nick
 chat_members = set()     # users who have set a nick
-waiting_for_nick = set() # users currently entering a nick
+waiting_for_nick = set() # users entering a nick
 
 # ==== DB setup ====
 dir_path = os.path.dirname(DB_PATH)
@@ -27,7 +31,6 @@ if dir_path:
 
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -40,12 +43,23 @@ CREATE TABLE IF NOT EXISTS messages (
     user_id INTEGER,
     content_type TEXT,
     text TEXT,
+    telegram_msg_id INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS pinned_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER,
+    user_id INTEGER,
+    content_type TEXT,
+    text TEXT
 )
 """)
 conn.commit()
 conn.close()
 
+# ==== DB functions ====
 def add_user(user_id: int, nick: str):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("INSERT OR REPLACE INTO users (user_id, nick) VALUES (?, ?)", (user_id, nick))
@@ -58,40 +72,32 @@ def get_nick(user_id: int):
     conn.close()
     return row[0] if row else None
 
-def add_message(user_id: int, content_type: str, text: str = None):
+def add_message(user_id: int, content_type: str, text: str, telegram_msg_id: int):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO messages (user_id, content_type, text) VALUES (?, ?, ?)",
-        (user_id, content_type, text)
+        "INSERT INTO messages (user_id, content_type, text, telegram_msg_id) VALUES (?, ?, ?, ?)",
+        (user_id, content_type, text, telegram_msg_id)
     )
     msg_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return msg_id
 
-def get_message_preview(msg_id: int):
+def pin_message(message_id, user_id, content_type, text):
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT content_type, text FROM messages WHERE id=?", (msg_id,)).fetchone()
+    conn.execute(
+        "INSERT INTO pinned_messages (message_id, user_id, content_type, text) VALUES (?, ?, ?, ?)",
+        (message_id, user_id, content_type, text)
+    )
+    conn.commit()
     conn.close()
-    if not row:
-        return ""
-    content_type, text = row
-    if content_type == "text":
-        preview = text[:50] + ("..." if len(text) > 50 else "")
-    elif content_type == "photo":
-        preview = "📷 Photo"
-    elif content_type == "video":
-        preview = "📹 Video"
-    elif content_type == "document":
-        preview = "📎 Document"
-    elif content_type == "voice":
-        preview = "🎤 Voice"
-    elif content_type == "audio":
-        preview = "🎵 Audio"
-    else:
-        preview = "🗂 Message"
-    return preview
+
+def get_pinned_messages():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT user_id, content_type, text FROM pinned_messages ORDER BY id").fetchall()
+    conn.close()
+    return rows
 
 # ==== Commands ====
 @dp.message(Command("start"))
@@ -99,6 +105,16 @@ async def start_cmd(message: types.Message):
     user_id = message.from_user.id
     waiting_for_nick.add(user_id)
     await message.answer("Hello! 👋 Enter your name for the anonymous chat:")
+
+    # send pinned messages
+    pinned = get_pinned_messages()
+    for uid, content_type, text in pinned:
+        sender_nick = get_nick(uid) or "Anonymous"
+        try:
+            if content_type == "text":
+                await message.answer(f"📌 {sender_nick}: {text}")
+        except:
+            pass
 
 @dp.message(Command("name"))
 async def change_nick_cmd(message: types.Message):
@@ -108,7 +124,6 @@ async def change_nick_cmd(message: types.Message):
 
 @dp.message(Command("members"))
 async def members_cmd(message: types.Message):
-    # Remove unavailable users
     to_remove = set()
     for uid in chat_members:
         try:
@@ -126,13 +141,43 @@ async def members_cmd(message: types.Message):
     nick_list = [user_nicks[uid] for uid in chat_members]
     await message.answer("👥 Active chat members:\n" + "\n".join(f"- {n}" for n in nick_list))
 
+@dp.message(Command("pinned"))
+async def pinned_cmd(message: types.Message):
+    pinned = get_pinned_messages()
+    if not pinned:
+        await message.answer("No pinned messages yet 📌")
+        return
+    text = "📌 Pinned messages:\n"
+    for uid, content_type, txt in pinned:
+        nick = get_nick(uid) or "Anonymous"
+        text += f"- {nick}: {txt}\n"
+    await message.answer(text)
+
+@dp.message(Command("pin"))
+async def pin_cmd(message: types.Message):
+    # admin only
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("Only admin can pin messages")
+        return
+
+    # reply required
+    if not message.reply_to_message:
+        await message.answer("Reply to the message you want to pin with /pin")
+        return
+
+    # save pinned
+    content_type = message.reply_to_message.content_type
+    text = message.reply_to_message.text or message.reply_to_message.caption or ""
+    telegram_msg_id = message.reply_to_message.message_id
+    pin_message(telegram_msg_id, message.reply_to_message.from_user.id, content_type, text)
+    await message.answer("✅ Message pinned")
+
 # ==== Message handling ====
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
     text = message.text.strip() if message.text else ""
 
-    # Set or change nick
     if user_id in waiting_for_nick:
         nick = text
         add_user(user_id, nick)
@@ -140,39 +185,49 @@ async def handle_message(message: types.Message):
         chat_members.add(user_id)
         waiting_for_nick.remove(user_id)
         await message.answer(f"✅ Your name is set: {nick}\nYou can now chat!")
+
+        # send pinned messages
+        pinned = get_pinned_messages()
+        for uid, content_type, txt in pinned:
+            sender_nick = get_nick(uid) or "Anonymous"
+            try:
+                if content_type == "text":
+                    await message.answer(f"📌 {sender_nick}: {txt}")
+            except:
+                pass
         return
 
-    # Relay messages to all others
     if user_id in chat_members:
         nick = user_nicks[user_id]
-        msg_id = add_message(user_id, message.content_type, text or message.caption)
-        reply_text = ""
-        if message.reply_to_message:
-            reply_text = f"(Reply to: {get_message_preview(msg_id-1)})\n"
-
         to_remove = set()
+        reply_to_id = None
+        if message.reply_to_message:
+            reply_to_id = message.reply_to_message.message_id
+
         for uid in chat_members:
             if uid == user_id:
                 continue
             try:
                 # Text
                 if message.text:
-                    await bot.send_message(uid, f"{reply_text}**{nick}:** {text}", parse_mode="Markdown")
-                # Photo
-                if message.photo:
-                    await bot.send_photo(uid, message.photo[-1].file_id, caption=f"{reply_text}**{nick}:** {message.caption or ''}", parse_mode="Markdown")
-                # Video
-                if message.video:
-                    await bot.send_video(uid, message.video.file_id, caption=f"{reply_text}**{nick}:** {message.caption or ''}", parse_mode="Markdown")
-                # Audio
-                if message.audio:
-                    await bot.send_audio(uid, audio=message.audio.file_id, caption=f"{reply_text}**{nick}**")
-                # Voice
-                if message.voice:
-                    await bot.send_voice(uid, voice=message.voice.file_id, caption=f"{reply_text}**{nick}**")
-                # Document
-                if message.document:
-                    await bot.send_document(uid, document=message.document.file_id, caption=f"{reply_text}**{nick}**")
+                    sent = await bot.send_message(uid, f"**{nick}:** {text}", parse_mode="Markdown", reply_to_message_id=reply_to_id)
+                    add_message(user_id, "text", text, sent.message_id)
+                # Media (photo/video/audio/document/voice)
+                elif message.photo:
+                    sent = await bot.send_photo(uid, message.photo[-1].file_id, caption=f"**{nick}:** {message.caption or ''}", parse_mode="Markdown", reply_to_message_id=reply_to_id)
+                    add_message(user_id, "photo", message.caption or "", sent.message_id)
+                elif message.video:
+                    sent = await bot.send_video(uid, message.video.file_id, caption=f"**{nick}:** {message.caption or ''}", parse_mode="Markdown", reply_to_message_id=reply_to_id)
+                    add_message(user_id, "video", message.caption or "", sent.message_id)
+                elif message.audio:
+                    sent = await bot.send_audio(uid, audio=message.audio.file_id, caption=f"**{nick}:**", reply_to_message_id=reply_to_id)
+                    add_message(user_id, "audio", "", sent.message_id)
+                elif message.voice:
+                    sent = await bot.send_voice(uid, voice=message.voice.file_id, caption=f"**{nick}:**", reply_to_message_id=reply_to_id)
+                    add_message(user_id, "voice", "", sent.message_id)
+                elif message.document:
+                    sent = await bot.send_document(uid, document=message.document.file_id, caption=f"**{nick}:**", reply_to_message_id=reply_to_id)
+                    add_message(user_id, "document", message.document.file_name or "", sent.message_id)
 
             except Exception as e:
                 to_remove.add(uid)
