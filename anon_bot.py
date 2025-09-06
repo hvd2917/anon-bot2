@@ -5,10 +5,10 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# ====== Settings ======
+# ===== Settings =====
 API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://your-app.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
 PORT = int(os.getenv("PORT", 8443))
 DB_PATH = os.getenv("DB_PATH", "chat.db")  # use "/data/chat.db" on Paid plan
 
@@ -20,7 +20,7 @@ dp = Dispatcher()
 
 WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
 
-# ====== Database ======
+# ===== Database =====
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -39,12 +39,12 @@ async def init_db():
 
 asyncio.run(init_db())
 
-# ====== In-memory structures ======
-chat_members = set()       # users who have set a nick
-waiting_for_nick = set()   # users entering nick
-pinned_messages = {}       # message_id -> content
+# ===== In-memory structures =====
+chat_members = set()
+waiting_for_nick = set()
+pinned_messages = {}
 
-# ====== Commands ======
+# ===== Commands =====
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -59,7 +59,6 @@ async def cmd_change_nick(message: types.Message):
 
 @dp.message(Command("members"))
 async def cmd_members(message: types.Message):
-    # Send list of active users
     if not chat_members:
         await message.answer("The chat is empty 😕")
         return
@@ -85,7 +84,7 @@ async def cmd_pin(message: types.Message):
         await db.commit()
     await message.answer("📌 Message pinned!")
 
-# ====== Message Handler ======
+# ===== Message Handler =====
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
@@ -100,6 +99,7 @@ async def handle_message(message: types.Message):
         chat_members.add(user_id)
         waiting_for_nick.remove(user_id)
         await message.answer(f"✅ Your nickname is set: {nick}\nYou can now chat!")
+
         # Send pinned messages
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT content FROM pinned_messages") as cursor:
@@ -108,7 +108,7 @@ async def handle_message(message: types.Message):
                     await message.answer(f"📌 Pinned: {row[0]}")
         return
 
-    # Relay messages to all other users
+    # Relay messages
     if user_id not in chat_members:
         return
 
@@ -122,26 +122,27 @@ async def handle_message(message: types.Message):
         if uid == user_id:
             continue
         try:
-            # text
+            # Text
             if message.text:
                 if message.reply_to_message:
-                    reply_nick = "[reply]"
                     await bot.send_message(uid, f"**{nick} (reply):** {text}", parse_mode="Markdown")
                 else:
                     await bot.send_message(uid, f"**{nick}:** {text}", parse_mode="Markdown")
-            # photo
+            # Photo
             if message.photo:
-                await bot.send_photo(uid, photo=message.photo[-1].file_id, caption=f"**{nick}:** {message.caption or ''}", parse_mode="Markdown")
-            # video
+                await bot.send_photo(uid, photo=message.photo[-1].file_id,
+                                     caption=f"**{nick}:** {message.caption or ''}", parse_mode="Markdown")
+            # Video
             if message.video:
-                await bot.send_video(uid, video=message.video.file_id, caption=f"**{nick}:** {message.caption or ''}", parse_mode="Markdown")
-            # audio
+                await bot.send_video(uid, video=message.video.file_id,
+                                     caption=f"**{nick}:** {message.caption or ''}", parse_mode="Markdown")
+            # Audio
             if message.audio:
                 await bot.send_audio(uid, audio=message.audio.file_id)
-            # voice
+            # Voice
             if message.voice:
                 await bot.send_voice(uid, voice=message.voice.file_id)
-            # document
+            # Document
             if message.document:
                 await bot.send_document(uid, document=message.document.file_id)
         except Exception as e:
@@ -152,7 +153,7 @@ async def handle_message(message: types.Message):
     for uid in to_remove:
         chat_members.discard(uid)
 
-# ====== Heartbeat ======
+# ===== Heartbeat =====
 async def heartbeat():
     while True:
         try:
@@ -160,16 +161,17 @@ async def heartbeat():
         except: pass
         await asyncio.sleep(3600)
 
-# ====== Webhook Server ======
+# ===== Webhook Server =====
 async def handle_webhook(request):
-    update = types.Update(**await request.json())
-    await dp.process_update(update, bot=bot)
-    return web.Response()
+    data = await request.json()
+    update = types.Update(**data)
+    await dp.update_router.feed_update(update)  # ✅ correct for aiogram v3
+    return web.Response(text="OK")
 
 app = web.Application()
 app.router.add_post(WEBHOOK_PATH, handle_webhook)
 
-# ====== Run ======
+# ===== Run =====
 async def main():
     asyncio.create_task(heartbeat())
     await bot.delete_webhook(drop_pending_updates=True)
