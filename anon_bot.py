@@ -10,7 +10,7 @@ API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
 PORT = int(os.getenv("PORT", 8443))
-DB_PATH = os.getenv("DB_PATH", "chat.db")  # use "/data/chat.db" on Paid plan
+DB_PATH = os.getenv("DB_PATH", "chat.db")  # Use persistent path for paid plan, e.g., /data/chat.db
 
 if not API_TOKEN or not ADMIN_ID or not WEBHOOK_URL:
     raise ValueError("Set API_TOKEN, ADMIN_ID, WEBHOOK_URL in Environment Variables")
@@ -42,7 +42,6 @@ asyncio.run(init_db())
 # ===== In-memory structures =====
 chat_members = set()
 waiting_for_nick = set()
-pinned_messages = {}
 
 # ===== Commands =====
 @dp.message(Command("start"))
@@ -76,11 +75,12 @@ async def cmd_pin(message: types.Message):
     if not message.reply_to_message:
         await message.answer("Reply to a message to pin it!")
         return
-    content = f"{message.reply_to_message.text or '[non-text content]'}"
-    pinned_messages[str(message.reply_to_message.message_id)] = content
+    content = message.reply_to_message.text or "[non-text content]"
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO pinned_messages (message_id, content) VALUES (?, ?)",
-                         (str(message.reply_to_message.message_id), content))
+        await db.execute(
+            "INSERT OR REPLACE INTO pinned_messages (message_id, content) VALUES (?, ?)",
+            (str(message.reply_to_message.message_id), content)
+        )
         await db.commit()
     await message.answer("📌 Message pinned!")
 
@@ -100,7 +100,7 @@ async def handle_message(message: types.Message):
         waiting_for_nick.remove(user_id)
         await message.answer(f"✅ Your nickname is set: {nick}\nYou can now chat!")
 
-        # Send pinned messages
+        # Send pinned messages to new user
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT content FROM pinned_messages") as cursor:
                 rows = await cursor.fetchall()
@@ -108,10 +108,10 @@ async def handle_message(message: types.Message):
                     await message.answer(f"📌 Pinned: {row[0]}")
         return
 
-    # Relay messages
     if user_id not in chat_members:
         return
 
+    # Get nick
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT nick FROM users WHERE user_id=?", (user_id,)) as cursor:
             row = await cursor.fetchone()
@@ -161,11 +161,11 @@ async def heartbeat():
         except: pass
         await asyncio.sleep(3600)
 
-# ===== Webhook Server =====
+# ===== Webhook =====
 async def handle_webhook(request):
     data = await request.json()
     update = types.Update(**data)
-    await dp.update_router.feed_update(update)  # ✅ correct for aiogram v3
+    await dp.feed_update(update)  # ✅ correct for aiogram v3
     return web.Response(text="OK")
 
 app = web.Application()
