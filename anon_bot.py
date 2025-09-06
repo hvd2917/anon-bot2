@@ -1,56 +1,84 @@
 import asyncio
 import os
+import sqlite3
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# Беремо токен з Replit Secrets
-API_TOKEN = os.getenv("API_TOKEN")
-if not API_TOKEN:
-    raise ValueError("Вкажи API_TOKEN у Secrets Replit")
+API_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # твій Telegram ID
+
+# Використовуємо Persistent Disk, якщо він є (наприклад /data/chat.db)
+DB_PATH = os.getenv("DB_PATH", "chat.db")
 
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot=bot)
+dp = Dispatcher()
 
-# словники для ніків та користувачів
-user_nicks = {}         # user_id -> nick
-chat_members = set()    # користувачі, які вже ввели нік
-waiting_for_nick = set()  # користувачі, які зараз вводять нік
+# ---------------- DB ---------------- #
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            nick TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-# команда /start
+# ---------------- Bot logic ---------------- #
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    user_id = message.from_user.id
-    waiting_for_nick.add(user_id)
     await message.answer("Привіт! 👋 Введи свій нік для анонімного чату:")
 
-# команда /nick — зміна ніку
-@dp.message(Command("nick"))
-async def change_nick_cmd(message: types.Message):
-    user_id = message.from_user.id
-    waiting_for_nick.add(user_id)
-    await message.answer("✏️ Введи новий нік, який хочеш встановити:")
-
-# обробка всіх повідомлень
 @dp.message()
 async def handle_message(message: types.Message):
-    user_id = message.from_user.id
-    text = message.text.strip()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
-    # Якщо користувач чекає на введення ніку
-    if user_id in waiting_for_nick:
-        nick = text
-        user_nicks[user_id] = nick
-        chat_members.add(user_id)
-        waiting_for_nick.remove(user_id)
-        await message.answer(f"✅ Твій нік встановлено: {nick}\nТепер можеш писати у чат!")
-        return
+    c.execute("SELECT nick FROM users WHERE user_id=?", (message.from_user.id,))
+    row = c.fetchone()
 
-    # Relay повідомлень всім іншим
-    if user_id in chat_members:
-        nick = user_nicks[user_id]
-        for uid in chat_members:
-            if uid != user_id:
-                try:
-                    await bot.send_message(uid, f"**{nick}:** {text}", parse_mode="Markdown")
-                except:
-                    pass
+    if not row:
+        nick = message.text.strip()
+        c.execute("INSERT OR REPLACE INTO users (user_id, nick) VALUES (?, ?)", 
+                  (message.from_user.id, nick))
+        conn.commit()
+        await message.answer(f"✅ Твій нік встановлено: {nick}")
+    else:
+        nick = row[0]
+        c.execute("INSERT INTO messages (user_id, content) VALUES (?, ?)", 
+                  (message.from_user.id, message.text))
+        conn.commit()
+        # Тут можна робити розсилку іншим учасникам
+    conn.close()
+
+# ---------------- Monitoring ---------------- #
+async def monitor():
+    while True:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("SELECT 1")
+            conn.close()
+        except Exception as e:
+            if ADMIN_ID:
+                await bot.send_message(ADMIN_ID, f"⚠️ Bot/DB error: {e}")
+        await asyncio.sleep(60)  # перевірка щохвилини
+
+# ---------------- Main ---------------- #
+async def main():
+    init_db()
+    asyncio.create_task(monitor())
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
