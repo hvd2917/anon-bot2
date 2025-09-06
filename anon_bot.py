@@ -10,7 +10,7 @@ API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
 PORT = int(os.getenv("PORT", 8443))
-DB_PATH = os.getenv("DB_PATH", "chat.db")  # Use persistent path for paid plan, e.g., /data/chat.db
+DB_PATH = os.getenv("DB_PATH", "chat.db")  # Use persistent path for Paid plan, e.g., /data/chat.db
 
 if not API_TOKEN or not ADMIN_ID or not WEBHOOK_URL:
     raise ValueError("Set API_TOKEN, ADMIN_ID, WEBHOOK_URL in Environment Variables")
@@ -165,7 +165,7 @@ async def heartbeat():
 async def handle_webhook(request):
     data = await request.json()
     update = types.Update(**data)
-    await dp.feed_update(update)  # ✅ correct for aiogram v3
+    await dp.feed_update(bot=bot, update=update)  # ✅ Correct for aiogram v3
     return web.Response(text="OK")
 
 app = web.Application()
